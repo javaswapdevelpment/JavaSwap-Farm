@@ -6,22 +6,8 @@ import '@pancakeswap/pancake-swap-lib/contracts/token/BEP20/SafeBEP20.sol';
 import '@pancakeswap/pancake-swap-lib/contracts/access/Ownable.sol';
 
 import "./JavaToken.sol";
-import "./SyrupBar.sol";
 
-// import "@nomiclabs/buidler/console.sol";
-
-interface IMigratorChef {
-    // Perform LP token migration from legacy JavaSwap to JavaSwap.
-    // Take the current LP token address and return the new LP token address.
-    // Migrator should have full access to the caller's LP token.
-    // Return the new LP token address.
-    //
-    // XXX Migrator must have allowance access to JavaSwap LP tokens.
-    // JavaSwap must mint EXACTLY the same amount of JavaSwap LP tokens or
-    // else something bad will happen. Traditional JavaSwap does not
-    // do that so be careful!
-    function migrate(IBEP20 token) external returns (IBEP20);
-}
+pragma solidity 0.6.12;
 
 // MasterChef is the master of Java. He can make Java and he is a fair guy.
 //
@@ -36,8 +22,8 @@ contract MasterChef is Ownable {
 
     // Info of each user.
     struct UserInfo {
-        uint256 amount;     // How many LP tokens the user has provided.
-        uint256 rewardDebt; // Reward debt. See explanation below.
+        uint256 amount;         // How many LP tokens the user has provided.
+        uint256 rewardDebt;     // Reward debt. See explanation below.
         //
         // We do some fancy math here. Basically, any point in time, the amount of JAVAs
         // entitled to a user but is pending to be distributed is:
@@ -56,21 +42,20 @@ contract MasterChef is Ownable {
         IBEP20 lpToken;           // Address of LP token contract.
         uint256 allocPoint;       // How many allocation points assigned to this pool. JAVAs to distribute per block.
         uint256 lastRewardBlock;  // Last block number that JAVAs distribution occurs.
-        uint256 accJavaPerShare; // Accumulated JAVAs per share, times 1e12. See below.
+        uint256 accJavaPerShare;   // Accumulated JAVAs per share, times 1e12. See below.
+        uint16 depositFeeBP;      // Deposit fee in basis points
     }
 
     // The JAVA TOKEN!
     JavaToken public java;
-    // The SYRUP TOKEN!
-    SyrupBar public syrup;
     // Dev address.
     address public devaddr;
     // JAVA tokens created per block.
     uint256 public javaPerBlock;
     // Bonus muliplier for early java makers.
-    uint256 public BONUS_MULTIPLIER = 1;
-    // The migrator contract. It has a lot of power. Can only be set through governance (owner).
-    IMigratorChef public migrator;
+    uint256 public constant BONUS_MULTIPLIER = 1;
+    // Deposit Fee address
+    address public feeAddress;
 
     // Info of each pool.
     PoolInfo[] public poolInfo;
@@ -87,31 +72,16 @@ contract MasterChef is Ownable {
 
     constructor(
         JavaToken _java,
-        SyrupBar _syrup,
         address _devaddr,
+        address _feeAddress,
         uint256 _javaPerBlock,
         uint256 _startBlock
     ) public {
         java = _java;
-        syrup = _syrup;
         devaddr = _devaddr;
+        feeAddress = _feeAddress;
         javaPerBlock = _javaPerBlock;
         startBlock = _startBlock;
-
-        // staking pool
-        poolInfo.push(PoolInfo({
-            lpToken: _java,
-            allocPoint: 1000,
-            lastRewardBlock: startBlock,
-            accJavaPerShare: 0
-        }));
-
-        totalAllocPoint = 1000;
-
-    }
-
-    function updateMultiplier(uint256 multiplierNumber) public onlyOwner {
-        BONUS_MULTIPLIER = multiplierNumber;
     }
 
     function poolLength() external view returns (uint256) {
@@ -120,7 +90,8 @@ contract MasterChef is Ownable {
 
     // Add a new lp to the pool. Can only be called by the owner.
     // XXX DO NOT add the same LP token more than once. Rewards will be messed up if you do.
-    function add(uint256 _allocPoint, IBEP20 _lpToken, bool _withUpdate) public onlyOwner {
+    function add(uint256 _allocPoint, IBEP20 _lpToken, uint16 _depositFeeBP, bool _withUpdate) public onlyOwner {
+        require(_depositFeeBP <= 10000, "add: invalid deposit fee basis points");
         if (_withUpdate) {
             massUpdatePools();
         }
@@ -130,52 +101,20 @@ contract MasterChef is Ownable {
             lpToken: _lpToken,
             allocPoint: _allocPoint,
             lastRewardBlock: lastRewardBlock,
-            accJavaPerShare: 0
+            accJavaPerShare: 0,
+            depositFeeBP: _depositFeeBP
         }));
-        updateStakingPool();
     }
 
-    // Update the given pool's JAVA allocation point. Can only be called by the owner.
-    function set(uint256 _pid, uint256 _allocPoint, bool _withUpdate) public onlyOwner {
+    // Update the given pool's JAVA allocation point and deposit fee. Can only be called by the owner.
+    function set(uint256 _pid, uint256 _allocPoint, uint16 _depositFeeBP, bool _withUpdate) public onlyOwner {
+        require(_depositFeeBP <= 10000, "set: invalid deposit fee basis points");
         if (_withUpdate) {
             massUpdatePools();
         }
-        uint256 prevAllocPoint = poolInfo[_pid].allocPoint;
+        totalAllocPoint = totalAllocPoint.sub(poolInfo[_pid].allocPoint).add(_allocPoint);
         poolInfo[_pid].allocPoint = _allocPoint;
-        if (prevAllocPoint != _allocPoint) {
-            totalAllocPoint = totalAllocPoint.sub(prevAllocPoint).add(_allocPoint);
-            updateStakingPool();
-        }
-    }
-
-    function updateStakingPool() internal {
-        uint256 length = poolInfo.length;
-        uint256 points = 0;
-        for (uint256 pid = 1; pid < length; ++pid) {
-            points = points.add(poolInfo[pid].allocPoint);
-        }
-        if (points != 0) {
-            points = points.div(3);
-            totalAllocPoint = totalAllocPoint.sub(poolInfo[0].allocPoint).add(points);
-            poolInfo[0].allocPoint = points;
-        }
-    }
-
-    // Set the migrator contract. Can only be called by the owner.
-    function setMigrator(IMigratorChef _migrator) public onlyOwner {
-        migrator = _migrator;
-    }
-
-    // Migrate lp token to another lp contract. Can be called by anyone. We trust that migrator contract is good.
-    function migrate(uint256 _pid) public {
-        require(address(migrator) != address(0), "migrate: no migrator");
-        PoolInfo storage pool = poolInfo[_pid];
-        IBEP20 lpToken = pool.lpToken;
-        uint256 bal = lpToken.balanceOf(address(this));
-        lpToken.safeApprove(address(migrator), bal);
-        IBEP20 newLpToken = migrator.migrate(lpToken);
-        require(bal == newLpToken.balanceOf(address(this)), "migrate: bad");
-        pool.lpToken = newLpToken;
+        poolInfo[_pid].depositFeeBP = _depositFeeBP;
     }
 
     // Return reward multiplier over the given _from to _to block.
@@ -205,7 +144,6 @@ contract MasterChef is Ownable {
         }
     }
 
-
     // Update reward variables of the given pool to be up-to-date.
     function updatePool(uint256 _pid) public {
         PoolInfo storage pool = poolInfo[_pid];
@@ -213,23 +151,20 @@ contract MasterChef is Ownable {
             return;
         }
         uint256 lpSupply = pool.lpToken.balanceOf(address(this));
-        if (lpSupply == 0) {
+        if (lpSupply == 0 || pool.allocPoint == 0) {
             pool.lastRewardBlock = block.number;
             return;
         }
         uint256 multiplier = getMultiplier(pool.lastRewardBlock, block.number);
         uint256 javaReward = multiplier.mul(javaPerBlock).mul(pool.allocPoint).div(totalAllocPoint);
         java.mint(devaddr, javaReward.div(10));
-        java.mint(address(syrup), javaReward);
+        java.mint(address(this), javaReward);
         pool.accJavaPerShare = pool.accJavaPerShare.add(javaReward.mul(1e12).div(lpSupply));
         pool.lastRewardBlock = block.number;
     }
 
     // Deposit LP tokens to MasterChef for JAVA allocation.
     function deposit(uint256 _pid, uint256 _amount) public {
-
-        require (_pid != 0, 'deposit JAVA by staking');
-
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][msg.sender];
         updatePool(_pid);
@@ -239,9 +174,15 @@ contract MasterChef is Ownable {
                 safeJavaTransfer(msg.sender, pending);
             }
         }
-        if (_amount > 0) {
+        if(_amount > 0) {
             pool.lpToken.safeTransferFrom(address(msg.sender), address(this), _amount);
-            user.amount = user.amount.add(_amount);
+            if(pool.depositFeeBP > 0){
+                uint256 depositFee = _amount.mul(pool.depositFeeBP).div(10000);
+                pool.lpToken.safeTransfer(feeAddress, depositFee);
+                user.amount = user.amount.add(_amount).sub(depositFee);
+            }else{
+                user.amount = user.amount.add(_amount);
+            }
         }
         user.rewardDebt = user.amount.mul(pool.accJavaPerShare).div(1e12);
         emit Deposit(msg.sender, _pid, _amount);
@@ -249,12 +190,9 @@ contract MasterChef is Ownable {
 
     // Withdraw LP tokens from MasterChef.
     function withdraw(uint256 _pid, uint256 _amount) public {
-
-        require (_pid != 0, 'withdraw JAVA by unstaking');
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][msg.sender];
         require(user.amount >= _amount, "withdraw: not good");
-
         updatePool(_pid);
         uint256 pending = user.amount.mul(pool.accJavaPerShare).div(1e12).sub(user.rewardDebt);
         if(pending > 0) {
@@ -268,65 +206,41 @@ contract MasterChef is Ownable {
         emit Withdraw(msg.sender, _pid, _amount);
     }
 
-    // Stake JAVA tokens to MasterChef
-    function enterStaking(uint256 _amount) public {
-        PoolInfo storage pool = poolInfo[0];
-        UserInfo storage user = userInfo[0][msg.sender];
-        updatePool(0);
-        if (user.amount > 0) {
-            uint256 pending = user.amount.mul(pool.accJavaPerShare).div(1e12).sub(user.rewardDebt);
-            if(pending > 0) {
-                safeJavaTransfer(msg.sender, pending);
-            }
-        }
-        if(_amount > 0) {
-            pool.lpToken.safeTransferFrom(address(msg.sender), address(this), _amount);
-            user.amount = user.amount.add(_amount);
-        }
-        user.rewardDebt = user.amount.mul(pool.accJavaPerShare).div(1e12);
-
-        syrup.mint(msg.sender, _amount);
-        emit Deposit(msg.sender, 0, _amount);
-    }
-
-    // Withdraw JAVA tokens from STAKING.
-    function leaveStaking(uint256 _amount) public {
-        PoolInfo storage pool = poolInfo[0];
-        UserInfo storage user = userInfo[0][msg.sender];
-        require(user.amount >= _amount, "withdraw: not good");
-        updatePool(0);
-        uint256 pending = user.amount.mul(pool.accJavaPerShare).div(1e12).sub(user.rewardDebt);
-        if(pending > 0) {
-            safeJavaTransfer(msg.sender, pending);
-        }
-        if(_amount > 0) {
-            user.amount = user.amount.sub(_amount);
-            pool.lpToken.safeTransfer(address(msg.sender), _amount);
-        }
-        user.rewardDebt = user.amount.mul(pool.accJavaPerShare).div(1e12);
-
-        syrup.burn(msg.sender, _amount);
-        emit Withdraw(msg.sender, 0, _amount);
-    }
-
     // Withdraw without caring about rewards. EMERGENCY ONLY.
     function emergencyWithdraw(uint256 _pid) public {
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][msg.sender];
-        pool.lpToken.safeTransfer(address(msg.sender), user.amount);
-        emit EmergencyWithdraw(msg.sender, _pid, user.amount);
+        uint256 amount = user.amount;
         user.amount = 0;
         user.rewardDebt = 0;
+        pool.lpToken.safeTransfer(address(msg.sender), amount);
+        emit EmergencyWithdraw(msg.sender, _pid, amount);
     }
 
     // Safe java transfer function, just in case if rounding error causes pool to not have enough JAVAs.
     function safeJavaTransfer(address _to, uint256 _amount) internal {
-        syrup.safeJavaTransfer(_to, _amount);
+        uint256 javaBal = java.balanceOf(address(this));
+        if (_amount > javaBal) {
+            java.transfer(_to, javaBal);
+        } else {
+            java.transfer(_to, _amount);
+        }
     }
 
     // Update dev address by the previous dev.
     function dev(address _devaddr) public {
         require(msg.sender == devaddr, "dev: wut?");
         devaddr = _devaddr;
+    }
+
+    function setFeeAddress(address _feeAddress) public{
+        require(msg.sender == feeAddress, "setFeeAddress: FORBIDDEN");
+        feeAddress = _feeAddress;
+    }
+
+    //Pancake has to add hidden dummy pools inorder to alter the emission, here we make it simple and transparent to all.
+    function updateEmissionRate(uint256 _javaPerBlock) public onlyOwner {
+        massUpdatePools();
+        javaPerBlock = _javaPerBlock;
     }
 }
