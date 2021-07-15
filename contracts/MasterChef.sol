@@ -6,6 +6,7 @@ import '@pancakeswap/pancake-swap-lib/contracts/token/BEP20/SafeBEP20.sol';
 import '@pancakeswap/pancake-swap-lib/contracts/access/Ownable.sol';
 
 import "./JavaToken.sol";
+import "./libs/IReferral.sol";
 
 pragma solidity 0.6.12;
 
@@ -66,9 +67,15 @@ contract MasterChef is Ownable {
     // The block number when JAVA mining starts.
     uint256 public startBlock;
 
+    // Referral contract address.
+    IReferral public referral;
+    // Referral commission rate in basis points.
+    uint16 public referralCommissionRate = 200;
+
     event Deposit(address indexed user, uint256 indexed pid, uint256 amount);
     event Withdraw(address indexed user, uint256 indexed pid, uint256 amount);
     event EmergencyWithdraw(address indexed user, uint256 indexed pid, uint256 amount);
+    event ReferralCommissionPaid(address indexed user, address indexed referrer, uint256 commissionAmount);
 
     constructor(
         JavaToken _java,
@@ -164,14 +171,21 @@ contract MasterChef is Ownable {
     }
 
     // Deposit LP tokens to MasterChef for JAVA allocation.
-    function deposit(uint256 _pid, uint256 _amount) public {
+    function deposit(uint256 _pid, uint256 _amount, address _referrer) public {
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][msg.sender];
         updatePool(_pid);
+
+        if (_amount > 0 && address(referral) != address(0) && _referrer != address(0) && _referrer != msg.sender) {
+            referral.recordReferral(msg.sender, _referrer);
+        }
+
+
         if (user.amount > 0) {
             uint256 pending = user.amount.mul(pool.accJavaPerShare).div(1e12).sub(user.rewardDebt);
             if(pending > 0) {
                 safeJavaTransfer(msg.sender, pending);
+                payReferralCommission(msg.sender, pending);
             }
         }
         if(_amount > 0) {
@@ -197,6 +211,7 @@ contract MasterChef is Ownable {
         uint256 pending = user.amount.mul(pool.accJavaPerShare).div(1e12).sub(user.rewardDebt);
         if(pending > 0) {
             safeJavaTransfer(msg.sender, pending);
+            payReferralCommission(msg.sender, pending);
         }
         if(_amount > 0) {
             user.amount = user.amount.sub(_amount);
@@ -242,5 +257,28 @@ contract MasterChef is Ownable {
     function updateEmissionRate(uint256 _javaPerBlock) public onlyOwner {
         massUpdatePools();
         javaPerBlock = _javaPerBlock;
+    }
+
+    // Allows to update the referral contract. It must be approved and executed by Governance
+    function setReferral(IReferral _referral) public onlyOwner {
+        referral = _referral;
+    }
+
+    // Updates must be approved and executed by Governance
+    function setReferralCommissionRate(uint16 _referralCommissionRate) public onlyOwner {
+        referralCommissionRate = _referralCommissionRate;
+    }
+
+    // Pay referral commission to the referrer who referred this user.
+    function payReferralCommission(address _user, uint256 _pending) internal {
+        if (address(referral) != address(0) && referralCommissionRate > 0) {
+            address referrer = referral.getReferrer(_user);
+            uint256 commissionAmount = _pending.mul(referralCommissionRate).div(10000);
+
+            if (referrer != address(0) && commissionAmount > 0) {
+                java.mint(referrer, commissionAmount);
+                emit ReferralCommissionPaid(_user, referrer, commissionAmount);
+            }
+        }
     }
 }
