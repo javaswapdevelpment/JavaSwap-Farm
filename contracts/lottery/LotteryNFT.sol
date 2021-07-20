@@ -1,9 +1,9 @@
 pragma solidity 0.6.12;
 pragma experimental ABIEncoderV2;
 
-import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
-import "@openzeppelin/contracts/utils/Counters.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts@3.1.0/utils/Counters.sol";
+import "@openzeppelin/contracts@3.1.0/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts@3.1.0/access/Ownable.sol";
 
 contract LotteryNFT is ERC721, Ownable {
     using Counters for Counters.Counter;
